@@ -440,7 +440,7 @@ static int nand_block_bad(struct mtd_info *mtd, loff_t ofs)
 
 	for (; page < page_end; page++) {
 		res = chip->ecc.read_oob(mtd, chip, page);
-		if (res < 0)
+		if (res)
 			return res;
 
 		bad = chip->oob_poi[chip->badblockpos];
@@ -710,8 +710,7 @@ static void nand_command(struct mtd_info *mtd, unsigned int command,
 		chip->cmd_ctrl(mtd, readcmd, ctrl);
 		ctrl &= ~NAND_CTRL_CHANGE;
 	}
-	if (command != NAND_CMD_NONE)
-		chip->cmd_ctrl(mtd, command, ctrl);
+	chip->cmd_ctrl(mtd, command, ctrl);
 
 	/* Address cycle, when necessary */
 	ctrl = NAND_CTRL_ALE | NAND_CTRL_CHANGE;
@@ -740,7 +739,6 @@ static void nand_command(struct mtd_info *mtd, unsigned int command,
 	 */
 	switch (command) {
 
-	case NAND_CMD_NONE:
 	case NAND_CMD_PAGEPROG:
 	case NAND_CMD_ERASE1:
 	case NAND_CMD_ERASE2:
@@ -834,9 +832,7 @@ static void nand_command_lp(struct mtd_info *mtd, unsigned int command,
 	}
 
 	/* Command latch cycle */
-	if (command != NAND_CMD_NONE)
-		chip->cmd_ctrl(mtd, command,
-			       NAND_NCE | NAND_CLE | NAND_CTRL_CHANGE);
+	chip->cmd_ctrl(mtd, command, NAND_NCE | NAND_CLE | NAND_CTRL_CHANGE);
 
 	if (column != -1 || page_addr != -1) {
 		int ctrl = NAND_CTRL_CHANGE | NAND_NCE | NAND_ALE;
@@ -872,7 +868,6 @@ static void nand_command_lp(struct mtd_info *mtd, unsigned int command,
 	 */
 	switch (command) {
 
-	case NAND_CMD_NONE:
 	case NAND_CMD_CACHEDPROG:
 	case NAND_CMD_PAGEPROG:
 	case NAND_CMD_ERASE1:
@@ -1251,7 +1246,6 @@ int nand_reset(struct nand_chip *chip, int chipnr)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(nand_reset);
 
 /**
  * nand_check_erased_buf - check if a buffer contains (almost) only 0xff data
@@ -2206,7 +2200,6 @@ EXPORT_SYMBOL(nand_write_oob_syndrome);
 static int nand_do_read_oob(struct mtd_info *mtd, loff_t from,
 			    struct mtd_oob_ops *ops)
 {
-	unsigned int max_bitflips = 0;
 	int page, realpage, chipnr;
 	struct nand_chip *chip = mtd_to_nand(mtd);
 	struct mtd_ecc_stats stats;
@@ -2264,8 +2257,6 @@ static int nand_do_read_oob(struct mtd_info *mtd, loff_t from,
 				nand_wait_ready(mtd);
 		}
 
-		max_bitflips = max_t(unsigned int, max_bitflips, ret);
-
 		readlen -= len;
 		if (!readlen)
 			break;
@@ -2291,7 +2282,7 @@ static int nand_do_read_oob(struct mtd_info *mtd, loff_t from,
 	if (mtd->ecc_stats.failed - stats.failed)
 		return -EBADMSG;
 
-	return max_bitflips;
+	return  mtd->ecc_stats.corrected - stats.corrected ? -EUCLEAN : 0;
 }
 
 /**
@@ -2808,17 +2799,14 @@ static int panic_nand_write(struct mtd_info *mtd, loff_t to, size_t len,
 			    size_t *retlen, const uint8_t *buf)
 {
 	struct nand_chip *chip = mtd_to_nand(mtd);
-	int chipnr = (int)(to >> chip->chip_shift);
 	struct mtd_oob_ops ops;
 	int ret;
 
-	/* Grab the device */
-	panic_nand_get_device(chip, mtd, FL_WRITING);
-
-	chip->select_chip(mtd, chipnr);
-
 	/* Wait for the device to get ready */
 	panic_nand_wait(mtd, chip, 400);
+
+	/* Grab the device */
+	panic_nand_get_device(chip, mtd, FL_WRITING);
 
 	memset(&ops, 0, sizeof(ops));
 	ops.len = len;
@@ -2908,7 +2896,17 @@ static int nand_do_write_oob(struct mtd_info *mtd, loff_t to,
 	 * if we don't do this. I have no clue why, but I seem to have 'fixed'
 	 * it in the doc2000 driver in August 1999.  dwmw2.
 	 */
-	nand_reset(chip, chipnr);
+	/*
+	 * Nand onfi compatible devices may support different data interface
+	 * modes like SDR, NVDDR and NVDDR2. Giving reset to device places the
+	 * device in to power-up state and places the target in the SDR data
+	 * interface mode. This will be the problem for devices configured for
+	 * NVDDR modes. So, limiting the reset operation to Toshiba devices.
+	 */
+	if (chip->onfi_params.jedec_id == NAND_MFR_TOSHIBA) {
+		chip->cmdfunc(mtd, NAND_CMD_RESET, -1, -1);
+		nand_reset(chip, chipnr);
+	}
 
 	chip->select_chip(mtd, chipnr);
 
@@ -3483,6 +3481,12 @@ static int nand_flash_detect_onfi(struct nand_chip *chip)
 	struct nand_onfi_params *p = &chip->onfi_params;
 	int i, j;
 	int val;
+
+	/* ONFI need to be probed in 8 bits mode, and 16 bits should be selected with NAND_BUSWIDTH_AUTO */
+	if (chip->options & NAND_BUSWIDTH_16) {
+		pr_err("Trying ONFI probe in 16 bits mode, aborting !\n");
+		return 0;
+	}
 
 	/* Try ONFI for unknown chip or LP */
 	chip->cmdfunc(mtd, NAND_CMD_READID, 0x20, -1);

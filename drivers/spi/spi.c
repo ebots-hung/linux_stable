@@ -779,14 +779,8 @@ static int spi_map_buf(struct spi_controller *ctlr, struct device *dev,
 	for (i = 0; i < sgs; i++) {
 
 		if (vmalloced_buf || kmap_buf) {
-			/*
-			 * Next scatterlist entry size is the minimum between
-			 * the desc_len and the remaining buffer length that
-			 * fits in a page.
-			 */
-			min = min_t(size_t, desc_len,
-				    min_t(size_t, len,
-					  PAGE_SIZE - offset_in_page(buf)));
+			min = min_t(size_t,
+				    len, desc_len - offset_in_page(buf));
 			if (vmalloced_buf)
 				vm_page = vmalloc_to_page(buf);
 			else
@@ -1222,7 +1216,6 @@ static void __spi_pump_messages(struct spi_controller *ctlr, bool in_kthread)
 	if (!was_busy && ctlr->auto_runtime_pm) {
 		ret = pm_runtime_get_sync(ctlr->dev.parent);
 		if (ret < 0) {
-			pm_runtime_put_noidle(ctlr->dev.parent);
 			dev_err(&ctlr->dev, "Failed to power device: %d\n",
 				ret);
 			mutex_unlock(&ctlr->io_mutex);
@@ -2252,13 +2245,18 @@ static int __unregister(struct device *dev, void *null)
 void spi_unregister_controller(struct spi_controller *ctlr)
 {
 	struct spi_controller *found;
-	int id = ctlr->bus_num;
 	int dummy;
 
 	/* First make sure that this controller was ever added */
 	mutex_lock(&board_lock);
-	found = idr_find(&spi_master_idr, id);
+	found = idr_find(&spi_master_idr, ctlr->bus_num);
 	mutex_unlock(&board_lock);
+	if (found != ctlr) {
+		dev_dbg(&ctlr->dev,
+			"attempting to delete unregistered controller [%s]\n",
+			dev_name(&ctlr->dev));
+		return;
+	}
 	if (ctlr->queued) {
 		if (spi_destroy_queue(ctlr))
 			dev_err(&ctlr->dev, "queue remove failed\n");
@@ -2271,8 +2269,7 @@ void spi_unregister_controller(struct spi_controller *ctlr)
 	device_unregister(&ctlr->dev);
 	/* free bus id */
 	mutex_lock(&board_lock);
-	if (found == ctlr)
-		idr_remove(&spi_master_idr, id);
+	idr_remove(&spi_master_idr, ctlr->bus_num);
 	mutex_unlock(&board_lock);
 }
 EXPORT_SYMBOL_GPL(spi_unregister_controller);
@@ -2787,6 +2784,14 @@ static int __spi_validate(struct spi_device *spi, struct spi_message *message)
 
 	if (list_empty(&message->transfers))
 		return -EINVAL;
+
+	/*
+	 *  Data stripe option is selected if and only if when
+	 *  two chips are enabled
+	 */
+	if ((ctlr->flags & SPI_MASTER_DATA_STRIPE)
+			&& !(ctlr->flags & SPI_MASTER_BOTH_CS))
+			return -EINVAL;
 
 	/* Half-duplex links include original MicroWire, and ones with
 	 * only one data pin like SPI_3WIRE (switches direction) or where

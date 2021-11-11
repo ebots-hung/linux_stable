@@ -25,6 +25,7 @@
 #include <linux/of_platform.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/reset.h>
 
 /**
  * struct fpga_region - FPGA Region structure
@@ -147,7 +148,6 @@ static struct fpga_manager *fpga_region_get_manager(struct fpga_region *region)
 			mgr_node = of_parse_phandle(np, "fpga-mgr", 0);
 			if (mgr_node) {
 				mgr = of_fpga_mgr_get(mgr_node);
-				of_node_put(mgr_node);
 				of_node_put(np);
 				return mgr;
 			}
@@ -193,13 +193,10 @@ static int fpga_region_get_bridges(struct fpga_region *region,
 		parent_br = region_np->parent;
 
 	/* If overlay has a list of bridges, use it. */
-	br = of_parse_phandle(overlay, "fpga-bridges", 0);
-	if (br) {
-		of_node_put(br);
+	if (of_parse_phandle(overlay, "fpga-bridges", 0))
 		np = overlay;
-	} else {
+	else
 		np = region_np;
-	}
 
 	for (i = 0; ; i++) {
 		br = of_parse_phandle(np, "fpga-bridges", i);
@@ -207,15 +204,12 @@ static int fpga_region_get_bridges(struct fpga_region *region,
 			break;
 
 		/* If parent bridge is in list, skip it. */
-		if (br == parent_br) {
-			of_node_put(br);
+		if (br == parent_br)
 			continue;
-		}
 
 		/* If node is a bridge, get it and add to list */
 		ret = fpga_bridge_get_to_list(br, region->info,
 					      &region->bridge_list);
-		of_node_put(br);
 
 		/* If any of the bridges are in use, give up */
 		if (ret == -EBUSY) {
@@ -242,6 +236,7 @@ static int fpga_region_program_fpga(struct fpga_region *region,
 {
 	struct fpga_manager *mgr;
 	int ret;
+	struct reset_control *rstc;
 
 	region = fpga_region_get(region);
 	if (IS_ERR(region)) {
@@ -279,6 +274,13 @@ static int fpga_region_program_fpga(struct fpga_region *region,
 		pr_err("failed to enable region bridges\n");
 		goto err_put_br;
 	}
+
+	rstc = of_reset_control_array_get(overlay, false, true);
+	if (IS_ERR(rstc))
+		goto err_put_br;
+
+	reset_control_reset(rstc);
+	reset_control_put(rstc);
 
 	fpga_mgr_put(mgr);
 	fpga_region_put(region);

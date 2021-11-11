@@ -184,6 +184,7 @@ static ssize_t m25p80_read(struct spi_nor *nor, loff_t from, size_t len,
 	t[0].tx_buf = flash->command;
 	t[0].tx_nbits = inst_nbits;
 	t[0].len = m25p_cmdsz(nor) + dummy;
+	t[0].dummy = nor->read_dummy;
 	spi_message_add_tail(&t[0], &m);
 
 	/*
@@ -264,14 +265,13 @@ static int m25p_probe(struct spi_device *spi)
 
 	spi_set_drvdata(spi, flash);
 	flash->spi = spi;
+	nor->spi = spi;
 
 	if (spi->mode & SPI_RX_QUAD) {
 		hwcaps.mask |= SNOR_HWCAPS_READ_1_1_4;
 
 		if (spi->mode & SPI_TX_QUAD)
-			hwcaps.mask |= (SNOR_HWCAPS_READ_1_4_4 |
-					SNOR_HWCAPS_PP_1_1_4 |
-					SNOR_HWCAPS_PP_1_4_4);
+			hwcaps.mask |= SNOR_HWCAPS_PP_1_1_4;
 	} else if (spi->mode & SPI_RX_DUAL) {
 		hwcaps.mask |= SNOR_HWCAPS_READ_1_1_2;
 
@@ -309,6 +309,13 @@ static int m25p_remove(struct spi_device *spi)
 
 	/* Clean up MTD stuff. */
 	return mtd_device_unregister(&flash->spi_nor.mtd);
+}
+
+static void m25p_shutdown(struct spi_device *spi)
+{
+	struct m25p *flash = spi_get_drvdata(spi);
+
+	spi_nor_shutdown(&flash->spi_nor);
 }
 
 /*
@@ -385,6 +392,7 @@ static struct spi_driver m25p80_driver = {
 	.id_table	= m25p_ids,
 	.probe	= m25p_probe,
 	.remove	= m25p_remove,
+	.shutdown = m25p_shutdown,
 
 	/* REVISIT: many of these chips have deep power-down modes, which
 	 * should clearly be entered on suspend() to minimize power use.
