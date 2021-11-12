@@ -326,7 +326,7 @@ static bool ixgbevf_clean_tx_irq(struct ixgbevf_q_vector *q_vector,
 			break;
 
 		/* prevent any other reads prior to eop_desc */
-		smp_rmb();
+		read_barrier_depends();
 
 		/* if DD is not set pending work has not been completed */
 		if (!(eop_desc->wb.status & cpu_to_le32(IXGBE_TXD_STAT_DD)))
@@ -3737,7 +3737,6 @@ static int ixgbevf_set_mac(struct net_device *netdev, void *p)
 		return -EPERM;
 
 	ether_addr_copy(hw->mac.addr, addr->sa_data);
-	ether_addr_copy(hw->mac.perm_addr, addr->sa_data);
 	ether_addr_copy(netdev->dev_addr, addr->sa_data);
 
 	return 0;
